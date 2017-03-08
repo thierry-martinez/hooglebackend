@@ -1,4 +1,5 @@
 OCAMLFLAGS=-package compiler-libs.common
+OCAMLFIND=ocamlfind
 OCAMLOPT=$(OCAMLFIND) ocamlopt
 MKDIRP=mkdir -p
 PREFIX=/usr/local
@@ -11,6 +12,11 @@ all: hooglebackend
 
 hooglebackend: hooglebackend.cmx
 	$(OCAMLOPT) $(OCAMLFLAGS) -linkpkg -o $@ $<
+
+clean:
+	- rm hooglebackend
+	- rm hooglebackend.cmx
+	- rm hooglebackend.cmi
 
 install: hooglebackend
 	$(MKDIRP) $(bindir)
