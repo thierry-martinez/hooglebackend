@@ -1,166 +1,161 @@
-(* By convention, all type names have a "T" prepended to them, to make them
-   begin with a capital letter. (Note that "_t" is a valid OCaml type name, so
-   capitalize the first letter is not enough.) *)
-
-let haskellize_type_name s = Printf.sprintf "T%s" s
-
-(* All non alphanumeric characters are escaped (to handle identifiers like
-   "|>" and "#foo"): the convention is to replace every non alphanumeric
-   character "c" by "__XX" where "XX" is the hexadecimal character code.
-   "_" characters are preserved if they are isolated (i.e. if they are not
-   followed by another "_"). If a "_" is followed by another "_", then it
-   is replaced as other special characters. *)
-
 let escape s =
   let buf = Buffer.create (String.length s) in
   let rec escape_char i c =
     match c with
-      'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' ->
+      '\"' | '\\' ->
+        Buffer.add_char buf '\\';
         Buffer.add_char buf c
-    | '_' when i + 1 >= String.length s || s.[succ i] != '_' ->
-        Buffer.add_char buf '_'
+    | '\000' .. '\127' ->
+        Buffer.add_char buf c
     |  _ ->
-        Buffer.add_string buf (Printf.sprintf "__%.2X" (int_of_char c)) in
+        Buffer.add_string buf (Printf.sprintf "\\u%.4X" (int_of_char c)) in
   String.iteri escape_char s;
   Buffer.contents buf
 
-(* Module paths are flattened by considering "." as a special character:
-   "A.B" is printed as "A__2EB", where 2E is the character code for ".". *)
-
-let rec print_path chan path =
-  match path with
-    Path.Pident ident ->
-      output_string chan (escape ident.Ident.name)
-  | Path.Pdot (p, field, _) ->
-      Printf.fprintf chan "%a__2E%s" print_path p field
-  | Path.Papply (p, _) ->
-      print_path chan p
-
-let rec print_haskell_type_path chan path =
-  match path with
-    Path.Pident ident ->
-      output_string chan (haskellize_type_name (escape ident.Ident.name))
-  | Path.Pdot (p, field, _) ->
-      let type_name = haskellize_type_name (escape field) in
-      Printf.fprintf chan "%a.%s" print_path p type_name
-  | Path.Papply (p, _) ->
-      print_haskell_type_path chan p
-
-let print_list fmt print_item chan l =
-  List.iter (fun item -> Printf.fprintf chan fmt print_item item) l
-
-let print_comma_separated_list print_item chan l =
-  match l with
+let format_sequence list fmt =
+  match list with
     [] -> ()
   | head :: tail ->
-      print_item chan head;
-      print_list ", %a" print_item chan l
+      Format.fprintf fmt "@[%t@]" head;
+      List.iter (fun item -> Format.fprintf fmt "; @[%t@]" item) tail
 
-(* Non-generalizable variables are replaced with type variables t0, t1, etc. *)
+let format_list list fmt =
+  Format.fprintf fmt "@[[%t]@]" (format_sequence list)
+
+let format_escaped_string s fmt =
+  Format.fprintf fmt "\"%s\"" (escape s)
+
+let format_marked_list mark list =
+  format_list (format_escaped_string mark :: list)
+
+let rec format_path path =
+  match path with
+    Path.Pident ident ->
+      format_marked_list "Pident" [format_escaped_string ident.Ident.name]
+  | Path.Pdot (p, field, _) ->
+      format_marked_list "Pdot" [format_path p; format_escaped_string field]
+  | Path.Papply (p, p') ->
+      format_marked_list "Papply" [format_path p; format_path p']
+
+(* Non-generalizable variables are indexed. The index is stored using the name
+   format " %d" where %d is replaced by the index, given that no OCaml type name
+   can begin with a space. *)
 
 let fresh_count = ref 0
 
-(* Object types are represented by the type variable "object". All other fancy
-   types are represented by the type variable "unknown". *)
+let format_var index =
+  format_marked_list "Tvar" [fun fmt -> Format.fprintf fmt "%d" index]
 
-let rec print_type chan ty =
+(* Object types are represented by the token "Tobject". All other fancy
+   types are represented by the token "Tunknown". *)
+
+let rec format_type ty =
   match ty.Types.desc with
     Types.Tvar (Some x) ->
-      output_string chan x
+      if x.[0] = ' ' then
+        format_var (int_of_string (String.sub x 1 (pred (String.length x))))
+      else
+        format_marked_list "Tpoly" [format_escaped_string x]
   | Types.Tvar None ->
       let index = !fresh_count in
       fresh_count := succ index;
-      let fresh_name = Printf.sprintf "t%d" index in
-      ty.Types.desc <- Types.Tvar (Some fresh_name);
-      output_string chan fresh_name
+      ty.Types.desc <- Types.Tvar (Some (Printf.sprintf " %d" index));
+      format_var index
   | Types.Tarrow (_, a, b, _) ->
-      Printf.fprintf chan "(%a -> %a)" print_type a print_type b
+      format_marked_list "Tarrow" [format_type a; format_type b]
   | Types.Tconstr (c, args, _) ->
-      Printf.fprintf chan "%a%a" print_haskell_type_path c
-        (print_list " %a" print_type) args
-  | Types.Ttuple items ->
-      Printf.fprintf chan "(%a)" (print_comma_separated_list print_type) items
+      format_marked_list "Tconstr" (format_path c :: List.map format_type args)
+  | Types.Ttuple args ->
+      format_marked_list "Ttuple" (List.map format_type args)
   | Types.Tobject _ ->
-      output_string chan "object"
+      format_marked_list "Tobject" []
   | _ ->
-      output_string chan "unknown"
+      format_marked_list "Tunknown" []
 
-let print_value chan name ty =
-  Printf.fprintf chan "%s :: %a\n" (escape name.Ident.name) print_type ty
+let format_constructor_field field =
+  format_marked_list "field"
+    [format_escaped_string field.Types.ld_id.Ident.name;
+     format_type field.Types.ld_type]
 
-let print_constructor_output t chan output =
-  match output with
-    None -> print_type chan t
-  | Some t' -> print_type chan t'
+let format_constructor_args args =
+  match args with
+    Types.Cstr_tuple l ->
+      format_marked_list "tuple" (List.map format_type l)
+  | Types.Cstr_record l ->
+      format_marked_list "record" (List.map format_constructor_field l)
 
-let make_type desc = { Types.desc; level = 0; id = 0 }
+let format_constructor decl =
+  format_marked_list "constructor"
+    [format_escaped_string decl.Types.cd_id.Ident.name;
+     format_constructor_args decl.Types.cd_args]
 
-let make_constr name args =
-  make_type (Types.Tconstr (name, args, ref Types.Mnil))
+let format_label l =
+  format_marked_list "label"
+    [format_escaped_string l.Types.ld_id.Ident.name;
+     format_type l.Types.ld_type]
 
-let make_arrow a b =
-  make_type (Types.Tarrow (Asttypes.Nolabel, a, b, Types.Cunknown))
+let format_type_kind type_kind =
+  match type_kind.Types.type_kind with
+    Types.Type_variant constructors ->
+      format_marked_list "Type_variant"
+        (List.map format_constructor constructors)
+  | Types.Type_record (labels, _) ->
+      format_marked_list "Type_record" (List.map format_label labels)
+  | Types.Type_open ->
+      format_marked_list "Type_open" []
+  | Types.Type_abstract ->
+      match type_kind.Types.type_manifest with
+        None -> format_marked_list "Type_abstract" []
+      | Some ty -> format_marked_list "Type_alias" [format_type ty]
 
-let make_type_arguments arity =
-  Array.to_list
-    (Array.init arity
-       (fun i -> make_type (Types.Tvar (Some (Printf.sprintf "t%d" i)))))
+let format_option f o =
+  match o with
+    None ->
+      format_marked_list "None" []
+  | Some v ->
+      format_marked_list "Some" [f v]
 
-let print_constructor proto chan decl =
-  let result =
-    match decl.Types.cd_res with
-      None -> proto
-    | Some ty -> ty in
-  let args =
-    match decl.Types.cd_args with
-      Types.Cstr_tuple l -> l
-    | Types.Cstr_record l -> List.map (fun item -> item.Types.ld_type) l in
-  let ty = List.fold_right make_arrow args result in
-  print_value chan decl.Types.cd_id ty
-
-(* Modules are printed with a module declaration, even the file module.
-   The module path is fully printed. *)
-
-let print_module chan name =
-  Printf.fprintf chan "module %a where\n" print_path name
-
-let rec print_item module_name chan item =
+let rec format_item item =
   match item with
     Types.Sig_value (name, descr) ->
-      print_value chan name descr.Types.val_type
+      format_marked_list "Sig_value"
+        [format_escaped_string name.Ident.name;
+         format_type descr.Types.val_type]
   | Types.Sig_type (name, decl, _) ->
-      let proto =
-        make_constr (Path.Pident name)
-          (make_type_arguments decl.Types.type_arity) in
-      Printf.fprintf chan "data %a\n" print_type proto;
-      begin
-        match decl.Types.type_kind with
-          Types.Type_variant constructors ->
-            List.iter (print_constructor proto chan) constructors
-        | _ -> ()
-      end
+      format_marked_list "Sig_type"
+        [format_escaped_string name.Ident.name;
+         (fun fmt -> Format.fprintf fmt "%d" decl.Types.type_arity);
+         format_type_kind decl]
   | Types.Sig_module (name, decl, _) ->
-      let rec print_module_signature ty =
-        match ty with
-          Types.Mty_signature s ->
-            print_signature (Path.Pdot (module_name, name.Ident.name, 0)) chan s
-        | Types.Mty_functor (_, _, ty') -> print_module_signature ty'
-        | _ -> () in
-      print_module_signature decl.Types.md_type;
-      print_module chan module_name (* Come back to the parent module. *)
+      format_marked_list "Sig_module"
+        [format_escaped_string name.Ident.name;
+         format_module_signature decl.Types.md_type]
   | _ ->
-      ()
-and print_signature module_name chan s =
-  print_module chan module_name;
-  List.iter (print_item module_name chan) s
+      format_marked_list "Sig_unknown" []
+and format_signature s =
+  format_marked_list "Mty_signature" (List.map format_item s)
+and format_module_signature ty =
+  match ty with
+    Types.Mty_signature s -> format_signature s
+  | Types.Mty_functor (id, ty', ty'') ->
+      format_marked_list "Mty_functor"
+        [format_escaped_string id.Ident.name;
+         format_option format_module_signature ty';
+         format_module_signature ty'']
+  | Types.Mty_alias (_, p) ->
+      format_marked_list "Mty_alias" [format_path p]
+  | _ ->
+      format_marked_list "Mty_unknown" []
 
 let dump_file filename =
   let cmi = Cmt_format.read_cmi filename in
-  print_signature (Path.Pident (Ident.create cmi.Cmi_format.cmi_name))
-    stdout cmi.Cmi_format.cmi_sign
+  Format.printf "@[%t@]@."
+    (format_marked_list "module"
+       [format_escaped_string cmi.Cmi_format.cmi_name;
+        format_signature cmi.Cmi_format.cmi_sign])
 
 let main () =
-   Arg.parse [] dump_file "Dump .cmi files in Haskell syntax"
+   Arg.parse [] dump_file "Dump .cmi files in JSON syntax"
 
 let () =
   if not !Sys.interactive then

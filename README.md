@@ -1,3 +1,3 @@
 # hooglebackend
 
-Dump .cmi files in Haskell syntax.
+Dump .cmi files in JSON syntax.
