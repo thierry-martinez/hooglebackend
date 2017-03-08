@@ -1,0 +1,17 @@
+opam-version: "1.2"
+name: "hooglebackend"
+version: "20170308"
+maintainer: "Thierry Martinez <martinez@nsup.org>"
+authors: "Thierry Martinez <martinez@nsup.org>"
+homepage: "https://packages.gforge.inria.fr"
+bug-reports: "https://packages.gforge.inria.fr/hooglebackend/tracker"
+license: "GPL"
+dev-repo: "https://packages.gforge.inria.fr/hooglebackend.git"
+build: [
+  [make]
+]
+install: [make "install" "PREFIX=%{prefix}%"]
+remove: [make "uninstall" "PREFIX=%{prefix}%"]
+depends: [
+  "ocamlfind" {build}
+]
