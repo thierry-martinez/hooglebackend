@@ -17,7 +17,7 @@ let format_sequence list fmt =
     [] -> ()
   | head :: tail ->
       Format.fprintf fmt "@[%t@]" head;
-      List.iter (fun item -> Format.fprintf fmt ", @[%t@]" item) tail
+      List.iter (fun item -> Format.fprintf fmt ",@ @[%t@]" item) tail
 
 let format_list list fmt =
   Format.fprintf fmt "@[[%t]@]" (format_sequence list)
